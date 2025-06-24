@@ -51,6 +51,9 @@ void setup() {
   
   // Attach interrupt
   attachInterrupt(digitalPinToInterrupt(SIF_PIN), sifChange, CHANGE);
+  
+  // Send CSV header for logger
+  Serial.println("Timestamp,Byte0,Byte1,Byte2,Byte3,Byte4,Byte5,Byte6,Byte7,Byte8,Byte9,Byte10,Byte11,Battery,LoadVoltage,RPM,SpeedMode,Reverse,Brake,Regen,PowerState,B2Direction,EstPower");
 }
 
 void loop() {
@@ -75,6 +78,9 @@ void loop() {
     
     // Parse the data
     vehicleLogic.parseSifData(localSifData);
+    
+    // Send CSV data to logger (this was missing!)
+    sendDataToLogger(localSifData);
   }
   
   vehicleLogic.updateDataSource();
@@ -128,4 +134,57 @@ void IRAM_ATTR sifChange() {
     }
   }
   lastDuration = duration;
+}
+
+// Send CSV data to logger (format expected by Python logger)
+void sendDataToLogger(byte rawSifData[12]) {
+  VehicleData data = vehicleLogic.getVehicleData();
+  
+  // Generate timestamp in seconds (with decimals)
+  float timestamp = millis() / 1000.0;
+  
+  // Determine power state based on current conditions
+  String powerState = "IDLE";
+  if (data.regen) powerState = "REGEN";
+  else if (data.brake) powerState = "COAST"; 
+  else if (data.current > 10) powerState = "LOAD";
+  
+  // Calculate estimated power (simplified)
+  float estPower = abs(data.current * data.voltage / 1000.0); // kW
+  
+  // B2 direction (simplified - 1 if moving, 0 if stopped)
+  int b2Direction = (data.rpm > 100) ? 1 : 0;
+  
+  // Send CSV line matching logger format:
+  // Timestamp,Byte0,Byte1,...,Byte11,Battery,LoadVoltage,RPM,SpeedMode,Reverse,Brake,Regen,PowerState,B2Direction,EstPower
+  Serial.print(timestamp, 3);
+  Serial.print(",");
+  
+  // Raw SIF bytes (0-11)
+  for (int i = 0; i < 12; i++) {
+    Serial.print(rawSifData[i]);
+    Serial.print(",");
+  }
+  
+  // Processed values
+  Serial.print((int)data.battery);           // Battery %
+  Serial.print(",");
+  Serial.print((int)(data.voltage * 1.33));  // Load voltage (convert back to raw-ish)
+  Serial.print(",");
+  Serial.print(data.rpm);                    // RPM
+  Serial.print(",");
+  Serial.print(data.speedMode);              // Speed mode
+  Serial.print(",");
+  Serial.print(data.reverseMode ? 1 : 0);    // Reverse
+  Serial.print(",");
+  Serial.print(data.brake ? 1 : 0);          // Brake
+  Serial.print(",");
+  Serial.print(data.regen ? 1 : 0);          // Regen
+  Serial.print(",");
+  Serial.print(powerState);                  // Power state
+  Serial.print(",");
+  Serial.print(b2Direction);                 // B2 direction
+  Serial.print(",");
+  Serial.print(estPower, 2);                 // Estimated power
+  Serial.println();                          // End line
 }

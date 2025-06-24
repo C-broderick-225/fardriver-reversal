@@ -17,9 +17,7 @@ VehicleLogic::VehicleLogic() {
 }
 
 void VehicleLogic::init() {
-
   Serial.println("Vehicle Logic initialized");
-
 }
 
 void VehicleLogic::parsePythonData(String inputData) {
@@ -27,7 +25,6 @@ void VehicleLogic::parsePythonData(String inputData) {
     data.usingSifData = false;
     lastPythonData = millis();
     
-    Serial.println("Raw data: " + inputData);
     String values[8];
     int valueIndex = 0;
     int startPos = 5; 
@@ -58,8 +55,6 @@ void VehicleLogic::parsePythonData(String inputData) {
       data.current = values[6].toInt();
       data.voltage = values[7].toFloat();
       data.mph = calculateMph(data.rpm);
-      
-
     }
   }
 }
@@ -84,7 +79,7 @@ void VehicleLogic::parseSifData(byte sifData[12]) {
   data.voltage = sifData[10] * SIF_VOLTAGE_MULTIPLIER;
   data.mph = calculateMph(data.rpm);
   
-  Serial.println("SIF Data parsed - RPM: " + String(data.rpm) + ", MPH: " + String(data.mph));
+  // Removed debug print - CSV data is now sent via sendDataToLogger()
 }
 
 void VehicleLogic::updateDataSource() {
