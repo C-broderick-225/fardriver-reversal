@@ -60,26 +60,20 @@ void VehicleLogic::parsePythonData(String inputData) {
 }
 
 void VehicleLogic::parseSifData(byte sifData[12]) {
-  data.battery = constrain(sifData[9], 0, 100);
+  // Use exact Arduino Nano mapping that worked
+  data.battery = sifData[9];
   data.current = sifData[6];
-  
-  int newRpm = constrain(((sifData[7] << 8) + sifData[8]) * 1.91, MIN_RPM, 20000);
-  data.rpm = newRpm;
-  targetRpm = newRpm;
+ data.rpm = ((sifData[7] << 8) + sifData[8]) * 1.91;
+targetRpm = data.rpm;
+data.displayedRpm = data.rpm;  // Remove animation for testing
+  data.voltage = sifData[1] * 0.75;  // Fixed: was sifData[10], should be sifData[1]
   
   data.brake = bitRead(sifData[4], 5);
   data.regen = bitRead(sifData[4], 3);
   data.reverseMode = (sifData[5] == 4);
+  data.speedMode = sifData[4] & 0x07;
   
-  byte newSpeedMode = constrain(sifData[4] & 0x07, 1, MAX_SPEED_MODES);
-  if (isValidSpeedMode(newSpeedMode)) {
-    data.speedMode = newSpeedMode;
-  }
-  
-  data.voltage = sifData[10] * SIF_VOLTAGE_MULTIPLIER;
   data.mph = calculateMph(data.rpm);
-  
-  // Removed debug print - CSV data is now sent via sendDataToLogger()
 }
 
 void VehicleLogic::updateDataSource() {

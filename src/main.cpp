@@ -5,97 +5,168 @@
 #include "ui.h"
 #include "logic.h"
 
-#define TFT_CS   12  // GPIO12 (Chip Select)
-#define TFT_DC   13  // GPIO13 (Data/Command)
-#define TFT_RST  14  // GPIO14 (Reset)
-#define SIF_PIN  4   // GPIO4 (SIF input)
+#define TFT_CS   12
+#define TFT_DC   13
+#define TFT_RST  14
+#define SIF_PIN  4
 
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 VehicleLogic vehicleLogic;
 VehicleUI vehicleUI;
 
-// Simple interrupt variables (matching Nano approach)
 volatile unsigned long lastTime;
 volatile unsigned long lastDuration = 0;
 volatile byte lastCrc = 0;
-volatile byte sifData[12];
+volatile byte data[12];
 volatile int bitIndex = -1;
 volatile bool newDataAvailable = false;
 
-unsigned long lastUpdate = 0;
+unsigned long lastDataSent = 0;
+unsigned long lastDisplayUpdate = 0;
+unsigned long sifPacketCount = 0;
+bool debugMode = false;
 
 void IRAM_ATTR sifChange();
+void sendDataToLogger(byte rawSifData[12]);
+
+void sendDataToLogger(byte rawSifData[12]) {
+  VehicleData vehicleData = vehicleLogic.getVehicleData();
+  float timestamp = millis() / 1000.0;
+  
+  String powerState = "IDLE";
+  if (vehicleData.regen) powerState = "REGEN";
+  else if (vehicleData.brake) powerState = "COAST"; 
+  else if (vehicleData.current > 10) powerState = "LOAD";
+  
+  float estPower = abs(vehicleData.current * vehicleData.voltage / 1000.0);
+  int b2Direction = (vehicleData.rpm > 100) ? 1 : 0;
+  
+  Serial.print(timestamp, 3);
+  Serial.print(",");
+  
+  for (int i = 0; i < 12; i++) {
+    Serial.print(rawSifData[i]);
+    Serial.print(",");
+  }
+  
+  Serial.print((int)vehicleData.battery);           
+  Serial.print(",");
+  Serial.print((int)(vehicleData.voltage * 1.33));  
+  Serial.print(",");
+  Serial.print(vehicleData.rpm);                    
+  Serial.print(",");
+  Serial.print(vehicleData.speedMode);              
+  Serial.print(",");
+  Serial.print(vehicleData.reverseMode ? 1 : 0);    
+  Serial.print(",");
+  Serial.print(vehicleData.brake ? 1 : 0);          
+  Serial.print(",");
+  Serial.print(vehicleData.regen ? 1 : 0);          
+  Serial.print(",");
+  Serial.print(powerState);                  
+  Serial.print(",");
+  Serial.print(b2Direction);                 
+  Serial.print(",");
+  Serial.print(estPower, 2);                 
+  Serial.println();
+  Serial.flush();
+}
 
 void setup() {
-  // Initialize USB for ESP32-S2
   USB.begin();
   Serial.begin(115200);
   delay(1000);
   
-  // Initialize SPI with ESP32-S2 specific pins
-  SPI.begin(7, -1, 11, -1); // SCK=7, MISO=unused, MOSI=11
-  
-  // Initialize display
+  SPI.begin(7, -1, 11, -1);
   tft.init(240, 320);
-  tft.setRotation(3); // Landscape 320x240
+  tft.setRotation(3);
   
-  // Initialize vehicle systems
   vehicleLogic.init();
   vehicleUI.init(&tft);
-  
   vehicleUI.drawStartupScreen();
   
-  // Setup interrupt pin - same as working Nano
   pinMode(SIF_PIN, INPUT);
   lastTime = micros();
-  
-  // Attach interrupt
   attachInterrupt(digitalPinToInterrupt(SIF_PIN), sifChange, CHANGE);
   
-  // Send CSV header for logger
   Serial.println("Timestamp,Byte0,Byte1,Byte2,Byte3,Byte4,Byte5,Byte6,Byte7,Byte8,Byte9,Byte10,Byte11,Battery,LoadVoltage,RPM,SpeedMode,Reverse,Brake,Regen,PowerState,B2Direction,EstPower");
+  Serial.println("# ESP32-S2 SIF Reader Started");
 }
 
 void loop() {
-  // Handle serial data
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-    vehicleLogic.parsePythonData(command);
-  }
+  unsigned long currentMillis = millis();
   
-  // Process SIF data if available
   if (newDataAvailable && vehicleLogic.isUsingSifData()) {
     newDataAvailable = false;
+    sifPacketCount++;
     
-    // Copy volatile data to local array
-    byte localSifData[12];
+    byte localData[12];
     noInterrupts();
     for (int i = 0; i < 12; i++) {
-      localSifData[i] = sifData[i];
+      localData[i] = data[i];
     }
     interrupts();
     
-    // Parse the data
-    vehicleLogic.parseSifData(localSifData);
+    vehicleLogic.parseSifData(localData);
+    sendDataToLogger(localData);
+    lastDataSent = currentMillis;
+  }
+  
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
     
-    // Send CSV data to logger (this was missing!)
-    sendDataToLogger(localSifData);
+    if (command.equals("DEBUG_ON")) {
+      debugMode = true;
+      Serial.println("# Debug mode enabled");
+    } else if (command.equals("DEBUG_OFF")) {
+      debugMode = false;
+      Serial.println("# Debug mode disabled");
+    } else if (command.equals("STATUS")) {
+      Serial.print("# SIF Packets: ");
+      Serial.print(sifPacketCount);
+      Serial.print(", Using SIF: ");
+      Serial.println(vehicleLogic.isUsingSifData() ? "YES" : "NO");
+    } else if (command.equals("SIF_OFF")) {
+      vehicleLogic.setUsingSifData(false);
+      Serial.println("# SIF disabled - using Python data");
+    } else if (command.equals("SIF_ON")) {
+      vehicleLogic.setUsingSifData(true);
+      Serial.println("# SIF enabled");
+    } else {
+      vehicleLogic.parsePythonData(command);
+    }
   }
   
   vehicleLogic.updateDataSource();
   
-  // Update display
-  if (millis() - lastUpdate > 10) {
-    VehicleData data = vehicleLogic.getVehicleData();
-    vehicleUI.updateDisplay(data);
-    lastUpdate = millis();
+  if (currentMillis - lastDataSent > 200) {
+    byte localData[12];
+    noInterrupts();
+    for (int i = 0; i < 12; i++) {
+      localData[i] = data[i];
+    }
+    interrupts();
+    
+    sendDataToLogger(localData);
+    lastDataSent = currentMillis;
   }
   
-  delay(5);
+  if (currentMillis - lastDisplayUpdate > 50) {
+    VehicleData vehicleData = vehicleLogic.getVehicleData();
+    vehicleUI.updateDisplay(vehicleData);
+    lastDisplayUpdate = currentMillis;
+  }
+  
+  if (debugMode && currentMillis % 1000 == 0) {
+    Serial.print("# DEBUG - Packets: ");
+    Serial.print(sifPacketCount);
+    Serial.print(", Bit index: ");
+    Serial.println(bitIndex);
+  }
 }
 
-// Simple interrupt handler (exactly like working Nano)
+// Use working Arduino Nano interrupt logic
 void IRAM_ATTR sifChange() {
   int val = digitalRead(SIF_PIN);
   unsigned long duration = micros() - lastTime;
@@ -108,11 +179,12 @@ void IRAM_ATTR sifChange() {
       
       if (round(lastDuration / duration) >= 31) {
         bitIndex = 0;
+        for (int i = 0; i < 12; i++) data[i] = 0;
       } else if (ratio > 1.5) {
-        bitClear(sifData[bitIndex / 8], 7 - (bitIndex % 8));
+        bitClear(data[bitIndex / 8], 7 - (bitIndex % 8));
         bitComplete = true;
       } else if (1 / ratio > 1.5) {
-        bitSet(sifData[bitIndex / 8], 7 - (bitIndex % 8));
+        bitSet(data[bitIndex / 8], 7 - (bitIndex % 8));
         bitComplete = true;
       }
       
@@ -122,10 +194,10 @@ void IRAM_ATTR sifChange() {
           bitIndex = 0;
           byte crc = 0;
           for (int i = 0; i < 11; i++) {
-            crc ^= sifData[i];
+            crc ^= data[i];
           }
           
-          if (crc == sifData[11] && crc != lastCrc) {
+          if (crc == data[11] && crc != lastCrc) {
             lastCrc = crc;
             newDataAvailable = true;
           }
@@ -134,57 +206,4 @@ void IRAM_ATTR sifChange() {
     }
   }
   lastDuration = duration;
-}
-
-// Send CSV data to logger (format expected by Python logger)
-void sendDataToLogger(byte rawSifData[12]) {
-  VehicleData data = vehicleLogic.getVehicleData();
-  
-  // Generate timestamp in seconds (with decimals)
-  float timestamp = millis() / 1000.0;
-  
-  // Determine power state based on current conditions
-  String powerState = "IDLE";
-  if (data.regen) powerState = "REGEN";
-  else if (data.brake) powerState = "COAST"; 
-  else if (data.current > 10) powerState = "LOAD";
-  
-  // Calculate estimated power (simplified)
-  float estPower = abs(data.current * data.voltage / 1000.0); // kW
-  
-  // B2 direction (simplified - 1 if moving, 0 if stopped)
-  int b2Direction = (data.rpm > 100) ? 1 : 0;
-  
-  // Send CSV line matching logger format:
-  // Timestamp,Byte0,Byte1,...,Byte11,Battery,LoadVoltage,RPM,SpeedMode,Reverse,Brake,Regen,PowerState,B2Direction,EstPower
-  Serial.print(timestamp, 3);
-  Serial.print(",");
-  
-  // Raw SIF bytes (0-11)
-  for (int i = 0; i < 12; i++) {
-    Serial.print(rawSifData[i]);
-    Serial.print(",");
-  }
-  
-  // Processed values
-  Serial.print((int)data.battery);           // Battery %
-  Serial.print(",");
-  Serial.print((int)(data.voltage * 1.33));  // Load voltage (convert back to raw-ish)
-  Serial.print(",");
-  Serial.print(data.rpm);                    // RPM
-  Serial.print(",");
-  Serial.print(data.speedMode);              // Speed mode
-  Serial.print(",");
-  Serial.print(data.reverseMode ? 1 : 0);    // Reverse
-  Serial.print(",");
-  Serial.print(data.brake ? 1 : 0);          // Brake
-  Serial.print(",");
-  Serial.print(data.regen ? 1 : 0);          // Regen
-  Serial.print(",");
-  Serial.print(powerState);                  // Power state
-  Serial.print(",");
-  Serial.print(b2Direction);                 // B2 direction
-  Serial.print(",");
-  Serial.print(estPower, 2);                 // Estimated power
-  Serial.println();                          // End line
 }
